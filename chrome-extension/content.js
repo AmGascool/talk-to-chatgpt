@@ -1,4 +1,4 @@
-﻿// TALK TO CHATGPT
+// TALK TO CHATGPT
 // ---------------
 // Author		: C. NEDELCU
 // Version		: 2.6.2
@@ -61,6 +61,22 @@ var CN_TTS_ELEVENLABS_MODELS = {"eleven_monolingual_v1": "English only", "eleven
 var CN_TTS_ELEVENLABS_STABILITY = "";
 var CN_TTS_ELEVENLABS_SIMILARITY = "";
 
+// Use Wavenet for TTS
+var CN_TTS_WAVENET = false;
+
+// Wavenet API key
+var CN_TTS_WAVENET_APIKEY = "";
+
+// Wavenet voice
+var CN_TTS_WAVENET_VOICE = "";
+
+// Statically list Wavenet models (easier than to request from API)
+var CN_TTS_WAVENET_MODELS = {"en-US-Wavenet-A": "English (US)", "en-GB-Wavenet-A": "English (UK)"};
+
+// Other Wavenet settings
+var CN_TTS_WAVENET_SPEED = "";
+var CN_TTS_WAVENET_PITCH = "";
+
 // ----------------------------
 
 
@@ -85,11 +101,12 @@ var CN_SPEECHREC_DISABLED = false;
 var CN_CONVERSATION_SUSPENDED = false;
 var CN_BAR_COLOR_FLASH_GREY = false;
 var CN_TTS_ELEVENLABS_QUEUE = [];
+var CN_TTS_WAVENET_QUEUE = [];
 var CN_IS_CONVERTING = false;
 var CN_IS_PLAYING = false;
 var CN_CURRENT_AUDIO = null;
 
-// This function will say the given text out loud using the browser's speech synthesis API, or send the message to the ElevenLabs conversion stack
+// This function will say the given text out loud using the browser's speech synthesis API, or send the message to the ElevenLabs or Google Wavenet conversion stack
 function CN_SayOutLoud(text) {
         // If TTS is disabled and there's nothing to say, ensure speech recognition is started
         if (!text || CN_SPEAKING_DISABLED) {
@@ -124,6 +141,12 @@ function CN_SayOutLoud(text) {
 		CN_SayOutLoudElevenLabs(text);
 		return;
 	}
+
+        if (CN_TTS_WAVENET) {
+                // We are using Wavenet, so push message to queue
+                CN_SayOutLoudWavenet(text);
+                return;
+        }
 	
 	// Let's speak out loud with the browser's text-to-speech API
 	console.log("[BROWSER] Saying out loud: " + text);
@@ -396,6 +419,205 @@ function CN_ContinueElevenLabsPlaybackQueue() {
 	CN_TTS_ELEVENLABS_QUEUE[objIndex].played = true;
 	CN_TTS_ELEVENLABS_QUEUE[objIndex].audio = null; // Erase audio from memory
 }
+
+// Say a message out loud using Google Wavenet
+function CN_SayOutLoudWavenet(text) {
+	// Make border green
+	$("#CNStatusBar").css("background", "green");
+	
+	// Push message into queue (sequentially)
+	CN_TTS_WAVENET_QUEUE.push({
+		index: CN_TTS_WAVENET_QUEUE.length, // message index
+		text: text, // message text
+		audio: null, // message blob / audio URL to be played
+		converted: false, // has it been converted to audio yet?
+		played: false // has it been played yet?
+	});
+	
+	// If the TTS conversion task isn't running, run it
+	if (!CN_IS_CONVERTING) CN_ConvertTTSWavenet();
+}
+
+
+// Process next item in conversion queue
+function CN_ConvertTTSWavenet() {
+	// Start converting TTS
+	CN_IS_CONVERTING = true;
+	
+	// Identify next message to be converted
+	var obj = null;
+	var objIndex = null;
+	for(var i in CN_TTS_WAVENET_QUEUE) {
+		if (!CN_TTS_WAVENET_QUEUE[i].converted) {
+			obj = CN_TTS_WAVENET_QUEUE[i];
+			objIndex = i;
+			break;
+		}
+	}
+	
+	// If we didn't find an object to convert, then we are done
+	if (obj === null) {
+		CN_IS_CONVERTING = false;
+		return;
+	}
+	
+	// Get language code and voice ID
+	var parts = CN_TTS_WAVENET_VOICE.split(".");
+	var languageCode = parts[0];
+	var voiceId = typeof parts[1] == "undefined" ? "" : parts[1];
+	
+	// Tell the console for debugging
+	console.log("[WAVENET] Converting following text segment to audio using language " + languageCode + " and voice " + voiceId + ": " + obj.text);
+	
+	// We found an object to convert
+	// Prepare request and headers
+	var xhr = new XMLHttpRequest();
+	xhr.open("POST", "https://texttospeech.googleapis.com/v1/text:synthesize?key=" + CN_TTS_WAVENET_APIKEY);
+	xhr.setRequestHeader("Content-Type", "application/json");
+	xhr.responseType = "json";
+	
+	// Prepare request body
+	var body = {
+		input: { text: obj.text },
+		voice: {
+			languageCode: languageCode,
+			name: voiceId
+		},
+		audioConfig: {
+			audioEncoding: 'MP3'
+		}
+	};
+	
+	// What happens when we get the response
+	xhr.onreadystatechange = function () {
+		if (xhr.readyState === XMLHttpRequest.DONE) {
+			
+			try {
+				var status = xhr.status;
+				console.log("Received status from Wavenet: "+ status);
+				
+				// Read response and see what's inside
+				var resp = this.response;
+				
+				// Was there an error?
+				if (status !== 200) {
+					// Problem?
+					if (resp.error) {
+						// Show error and stop everything
+						CN_IS_CONVERTING = false;
+						CN_IS_READING = false;
+						CN_TTS_WAVENET_QUEUE = [];
+						alert("[1] Wavenet API error: " + resp.error.message);
+						CN_AfterSpeakOutLoudFinished();
+						return;
+					}
+					else {
+						CN_IS_CONVERTING = false;
+						CN_IS_READING = false;
+						CN_TTS_WAVENET_QUEUE = [];
+						alert("[2] Wavenet API error: " + status);
+						CN_AfterSpeakOutLoudFinished();
+						return;
+					}
+				}
+				
+				// No error. So we have base64 encoded audio data
+				var audioURL = "data:audio/mp3;base64," + resp.audioContent;
+				
+				// Has the queue been reset? (if we clicked Skip, or if we stopped audio playback)
+				if (CN_TTS_WAVENET_QUEUE.length ==0) return;
+				
+				CN_TTS_WAVENET_QUEUE[objIndex].audio = audioURL;
+				CN_TTS_WAVENET_QUEUE[objIndex].converted = true;
+				console.log("[WAVENET] Text converted to audio successfully");
+				
+				// What's next?
+				setTimeout(function() {
+					// Continue conversions if any
+					CN_ConvertTTSWavenet();
+					
+					// Start audio playback if not already
+					if (!CN_IS_PLAYING) CN_ContinueWavenetPlaybackQueue();
+				}, 100);
+				
+				
+			} catch (e) {
+				alert("Error with Wavenet API text-to-speech conversion: " + e.toString());
+			}
+		}
+	};
+	
+	// Sending to TTS API
+	xhr.send(JSON.stringify(body));
+}
+
+// Process the next item in the audio queue
+function CN_ContinueWavenetPlaybackQueue() {
+	CN_IS_PLAYING = true;
+	CN_IS_READING = true;
+	
+	// Identify next message to be played
+	var obj = null;
+	var objIndex = null;
+	for (var i in CN_TTS_WAVENET_QUEUE) {
+		if (CN_TTS_WAVENET_QUEUE[i].converted && !CN_TTS_WAVENET_QUEUE[i].played) {
+			obj = CN_TTS_WAVENET_QUEUE[i];
+			objIndex = i;
+			break;
+		}
+	}
+	
+	// If we didn't find an object to play, then we are done
+	if (obj === null) {
+		CN_IS_PLAYING = false;
+		CN_IS_READING = false;
+		
+		// Current audio stack complete
+		console.log("[WAVENET] Current stack of audio messages complete");
+		
+		// If there is no longer anything to convert or to play, we can resume listening
+		var canResumeListening = true;
+		for(var i in CN_TTS_WAVENET_QUEUE) {
+			if (!CN_TTS_WAVENET_QUEUE[i].played || !CN_TTS_WAVENET_QUEUE[i].converted) {
+				canResumeListening = false;
+				break;
+			}
+		}
+		
+		// Finished playing
+		if (canResumeListening) {
+			setTimeout(function () {
+				CN_AfterSpeakOutLoudFinished();
+			}, 250);
+		}
+		
+		return;
+	}
+	
+	console.log("[WAVENET] Playback of message "+objIndex+": "+obj.text);
+	
+	// Create audio object, set data
+	CN_CURRENT_AUDIO = new Audio();
+	CN_CURRENT_AUDIO.src = obj.audio;
+	
+	// What happens when ended?
+	CN_CURRENT_AUDIO.onended = function () {
+		
+		setTimeout(function () {
+			// Start audio playback if not already
+			CN_ContinueWavenetPlaybackQueue();
+		}, 100);
+		
+	};
+	
+	// Annnnd... action!
+	CN_CURRENT_AUDIO.play();
+	
+	// Mark as played so it doesn't play twice
+	CN_TTS_WAVENET_QUEUE[objIndex].played = true;
+	CN_TTS_WAVENET_QUEUE[objIndex].audio = null; // Erase audio from memory
+}
+
 
 
 // Occurs when speaking out loud is finished
@@ -758,7 +980,6 @@ function CN_KeepSpeechRecWorking() {
 		}
 	}
 }
-
 // Toggle button clicks: settings, pause, skip...
 function CN_ToggleButtonClick() {
 	var action = $(this).data("cn");
@@ -800,9 +1021,10 @@ function CN_ToggleButtonClick() {
 			$(".CNToggle[data-cn=speakoff]").css("display", "");
 			CN_SPEAKING_DISABLED = true;
 			
-			// Is there anything in the CN_TTS_ELEVENLABS_QUEUE ? clear it
-			if (CN_TTS_ELEVENLABS_QUEUE.length) {
+			// Is there anything in the CN_TTS_ELEVENLABS_QUEUE or CN_TTS_WAVENET_QUEUE? clear it
+			if (CN_TTS_ELEVENLABS_QUEUE.length || CN_TTS_WAVENET_QUEUE.length) {
 				CN_TTS_ELEVENLABS_QUEUE = [];
+				CN_TTS_WAVENET_QUEUE = [];
 				if (CN_CURRENT_AUDIO) CN_CURRENT_AUDIO.pause();
 				CN_CURRENT_AUDIO = null;
 				CN_IS_PLAYING = false;
@@ -836,9 +1058,10 @@ function CN_ToggleButtonClick() {
 		// Skip current message being read
 		case "skip":
 			
-			// Is there anything in the CN_TTS_ELEVENLABS_QUEUE ?  clear it
-			if (CN_TTS_ELEVENLABS_QUEUE.length) {
+			// Is there anything in the CN_TTS_ELEVENLABS_QUEUE or CN_TTS_WAVENET_QUEUE? clear it
+			if (CN_TTS_ELEVENLABS_QUEUE.length || CN_TTS_WAVENET_QUEUE.length) {
 				CN_TTS_ELEVENLABS_QUEUE = [];
+				CN_TTS_WAVENET_QUEUE = [];
 				if (CN_CURRENT_AUDIO) CN_CURRENT_AUDIO.pause();
 				CN_CURRENT_AUDIO = null;
 				CN_IS_PLAYING = false;
@@ -1119,112 +1342,132 @@ function CN_InitScript() {
 // Open settings menu
 function CN_OnSettingsIconClick() {
 	console.log("Opening settings menu");
-	
+
 	// Stop listening
 	CN_PAUSED = true;
 	if (CN_SPEECHREC) CN_SPEECHREC.stop();
-	
+
 	// A short text at the beginning
 	var desc = "<div style='text-align: left; margin: 8px;'>" +
 		"<a href='https://github.com/C-Nedelcu/talk-to-chatgpt/wiki/Status-page' target=_blank style='font-size: 16px; color: orange;'>If something doesn't appear to work, click here for status and troubleshooting</a>." +
 		"<br />Thank you for not instantly posting a 1-star review on the extension store if something doesn't work as expected :-) This is a free program I do in my spare time and I appreciate constructive criticism. Make sure to tell me what's wrong and I will look into it." +
 		"</div>";
-	
+
 	// Prepare settings row
 	var rows = "<h2>Language and speech settings</h2>";
 	rows += "<table width='100%' cellpadding=6 cellspacing=2 style='margin-top: 15px;'>";
-	
+
 	// 1. Bot's voice
 	var voices = "";
 	var n = 0;
 	speechSynthesis.getVoices().forEach(function (voice) {
 		var label = `${voice.name} (${voice.lang})`;
 		if (voice.default) label += ' — DEFAULT';
-		var SEL = (CN_WANTED_VOICE && CN_WANTED_VOICE.lang == voice.lang && CN_WANTED_VOICE.name == voice.name) ? "selected=selected": "";
-		voices += "<option value='"+n+"' "+SEL+">"+label+"</option>";
+		var SEL = (CN_WANTED_VOICE && CN_WANTED_VOICE.lang == voice.lang && CN_WANTED_VOICE.name == voice.name) ? "selected=selected" : "";
+		voices += "<option value='" + n + "' " + SEL + ">" + label + "</option>";
 		n++;
 	});
-	
+
 	// 4. Speech recognition language CN_WANTED_LANGUAGE_SPEECH_REC
 	var languages = "<option value=''></option>";
-	for(var i in CN_SPEECHREC_LANGS) {
+	for (var i in CN_SPEECHREC_LANGS) {
 		var languageName = CN_SPEECHREC_LANGS[i][0];
-		for(var j in CN_SPEECHREC_LANGS[i]) {
+		for (var j in CN_SPEECHREC_LANGS[i]) {
 			if (j == 0) continue;
 			var languageCode = CN_SPEECHREC_LANGS[i][j][0];
-			var SEL = languageCode == CN_WANTED_LANGUAGE_SPEECH_REC ? "selected='selected'": "";
-			languages += "<option value='"+languageCode+"' "+SEL+">"+languageName+" - "+languageCode+"</option>";
+			var SEL = languageCode == CN_WANTED_LANGUAGE_SPEECH_REC ? "selected='selected'" : "";
+			languages += "<option value='" + languageCode + "' " + SEL + ">" + languageName + " - " + languageCode + "</option>";
 		}
 	}
-	rows += "<tr><td style='white-space: nowrap'>Speech recognition language:</td><td><select id='TTGPTRecLang' style='width: 250px; padding: 2px; color: black;' >"+languages+"</select></td></tr>";
-	
-	rows += "<tr class='CNBrowserTTS' ><td style='white-space: nowrap'>AI voice and language:</td><td><select id='TTGPTVoice' style='width: 250px; padding: 2px; color: black'>" + voices + "</select></td></tr>";
-	
+	rows += "<tr><td style='white-space: nowrap'>Speech recognition language:</td><td><select id='TTGPTRecLang' style='width: 250px; padding: 2px; color: black;' >" + languages + "</select></td></tr>";
+
+	rows += "<tr class='CNBrowserTTS' ><td style='white-space: nowrap'>AI voice and language:</td><td><select id='TTGPTVoice' style='width: 250px; padding: 2px; color: black' >" + voices + "</select></td></tr>";
+
 	// 2. AI talking speed
 	rows += "<tr class='CNBrowserTTS' ><td style='white-space: nowrap'>AI talking speed (speech rate):</td><td><input type=number step='.1' id='TTGPTRate' style='color: black; padding: 2px; width: 100px;' value='" + CN_TEXT_TO_SPEECH_RATE + "' /></td></tr>";
-	
+
 	// 3. AI voice pitch
 	rows += "<tr class='CNBrowserTTS' ><td style='white-space: nowrap'>AI voice pitch:</td><td><input type=number step='.1' id='TTGPTPitch' style='width: 100px; padding: 2px; color: black;' value='" + CN_TEXT_TO_SPEECH_PITCH + "' /></td></tr>";
 
 	// 4. ElevenLabs
 	rows += "<tr><td style='white-space: nowrap'>ElevenLabs text-to-speech:</td><td><input type=checkbox id='TTGPTElevenLabs' " + (CN_TTS_ELEVENLABS ? "checked=checked" : "") + " /> <label for='TTGPTElevenLabs'> Use ElevenLabs API for text-to-speech (tick this to reveal additional settings)</label></td></tr>";
-	
+
 	// 5. ElevenLabs API key
 	rows += "<tr class='CNElevenLabs' style='display: none;'><td style='white-space: nowrap'>ElevenLabs API Key:</td><td><input type=text style='width: 250px; padding: 2px; color: black;' id='TTGPTElevenLabsKey' value=\"" + (CN_TTS_ELEVENLABS_APIKEY) + "\" /></td></tr>";
-	
+
 	// 6. ElevenLabs voice
 	rows += "<tr class='CNElevenLabs' style='display: none;'><td style='white-space: nowrap'>ElevenLabs voice:</td><td><select id='TTGPTElevenLabsVoice' style='width: 250px; padding: 2px; color: black;' >" + "</select> <span style='cursor: pointer; text-decoration: underline;' id='TTGPTElevenLabsRefresh' title='This will refresh the list of voices using your API key'>Refresh list</span></span></td></tr>";
-	
+
 	// 7. ElevenLabs settings
 	rows += "<tr class='CNElevenLabs' style='display: none;'><td style='white-space: nowrap'>ElevenLabs settings:</td>" +
 		"<td>" +
 		"Stability: <input type=number style='width: 100px; padding: 2px; color: black;' step='0.01' min='0' max='1' id='TTGPTElevenLabsStability' value=\"" + (CN_TTS_ELEVENLABS_STABILITY) + "\" />" +
 		"Similarity: <input type=number style='width: 100px; padding: 2px; color: black;' step='0.01' min='0' max='1' id='TTGPTElevenLabsSimilarity' value=\"" + (CN_TTS_ELEVENLABS_SIMILARITY) + "\" />" +
-		"<br />Leave blank for default, or set a number between 0 and 1 (example: 0.75)"
+		"<br />Leave blank for default, or set a number between 0 and 1 (example: 0.75)" +
 		"</td></tr>";
-	
+
 	// 7. ElevenLabs warning
 	rows += "<tr class='CNElevenLabs' style='display: none;'><td colspan=2>Warning: the ElevenLabs API is experimental. It doesn't work with every language, make sure you check the list of supported language from their website. We will keep up with ElevenLabs progress to ensure all ElevenLabs API functionality is available in Talk-to-ChatGPT.</td></tr>";
-	
+
+	// 8. Google Wavenet
+	rows += "<tr><td style='white-space: nowrap'>Google Wavenet text-to-speech:</td><td><input type=checkbox id='TTGPTWavenet' " + (CN_TTS_WAVENET ? "checked=checked" : "") + " /> <label for='TTGPTWavenet'> Use Google Wavenet API for text-to-speech (tick this to reveal additional settings)</label></td></tr>";
+
+	// 9. Google Wavenet API key
+	rows += "<tr class='CNWavenet' style='display: none;'><td style='white-space: nowrap'>Google Wavenet API Key:</td><td><input type=text style='width: 250px; padding: 2px; color: black;' id='TTGPTWavenetKey' value=\"" + (CN_TTS_WAVENET_APIKEY) + "\" /></td></tr>";
+
+	// 10. Google Wavenet voice
+	rows += "<tr class='CNWavenet' style='display: none;'><td style='white-space: nowrap'>Google Wavenet voice:</td><td><select id='TTGPTWavenetVoice' style='width: 250px; padding: 2px; color: black;' >" + "</select> <span style='cursor: pointer; text-decoration: underline;' id='TTGPTWavenetRefresh' title='This will refresh the list of voices using your API key'>Refresh list</span></span></td></tr>";
+
+	// 11. Google Wavenet settings
+	rows += "<tr class='CNWavenet' style='display: none;'><td style='white-space: nowrap'>Google Wavenet settings:</td>" +
+		"<td>" +
+		"Pitch: <input type=number style='width: 100px; padding: 2px; color: black;' step='0.1' min='-20' max='20' id='TTGPTWavenetPitch' value=\"" + (CN_TTS_WAVENET_PITCH) + "\" />" +
+		"Speed: <input type=number style='width: 100px; padding: 2px; color: black;' step='0.1' min='0.25' max='4' id='TTGPTWavenetSpeed' value=\"" + (CN_TTS_WAVENET_SPEED) + "\" />" +
+		"<br />Leave blank for default, or set a number between Pitch (-20 and 20) and Speed (0.25 and 4)" +
+		"</td></tr>";
+
+	// 12. Google Wavenet warning
+	rows += "<tr class='CNWavenet' style='display: none;'><td colspan=2>Warning: the Google Wavenet API may charge fees depending on usage. Make sure you understand the costs associated with Google Wavenet before using this feature.</td></tr>";
+
 	// Prepare save/close buttons
 	rows += "<tr><td colspan=2 style='text-align: center'><br />" +
 		"<button class='TTGPTSave' style='border: 2px solid grey; border-radius: 4px; padding: 6px 24px; font-size: 18px; font-weight: bold; opacity: 0.7;'>✓ Save</button>&nbsp;" +
 		"<button class='TTGPTCancel' style='border: 2px solid grey; border-radius: 4px; padding: 6px 24px; margin-left: 40px; font-size: 18px; opacity: 0.7;'>✗ Cancel</button></td></tr></table>";
-	
+
 	// Header - vocal commands
 	rows += "</table><br /><h2>Voice control</h2>";
 	rows += "<table width='100%' cellpadding=6 cellspacing=2 style='margin-top: 15px;'>";
-	
+
 	// 5. 'Stop' word
-	rows += "<tr><td style='white-space: nowrap'>'Stop' word:</td><td><input type=text id='TTGPTStopWord' style='width: 100px; padding: 2px; color: black;' value='"+CN_SAY_THIS_WORD_TO_STOP+"' /></td></tr>";
-	
+	rows += "<tr><td style='white-space: nowrap'>'Stop' word:</td><td><input type=text id='TTGPTStopWord' style='width: 100px; padding: 2px; color: black;' value='" + CN_SAY_THIS_WORD_TO_STOP + "' /></td></tr>";
+
 	// 6. 'Pause' word
-	rows += "<tr><td style='white-space: nowrap'>'Pause' word:</td><td><input type=text id='TTGPTPauseWord' style='width: 100px; padding: 2px; color: black;' value='"+CN_SAY_THIS_WORD_TO_PAUSE+"' /></td></tr>";
+	rows += "<tr><td style='white-space: nowrap'>'Pause' word:</td><td><input type=text id='TTGPTPauseWord' style='width: 100px; padding: 2px; color: black;' value='" + CN_SAY_THIS_WORD_TO_PAUSE + "' /></td></tr>";
 
 	// 7. Keep listening until resume
 	rows += "<tr><td style='white-space: nowrap'>Keep listening when paused:</td><td><input type=checkbox id='TTGPTKeepListening' " + (CN_KEEP_LISTENING ? "checked=checked" : "") + " /> <label for='TTGPTKeepListening'>When paused, keep the microphone open, and resume conversation when the 'pause' word (defined above) is spoken</label></td></tr>";
-	
+
 	// 8. Autosend
-	rows += "<tr><td style='white-space: nowrap'>Automatic send:</td><td><input type=checkbox id='TTGPTAutosend' "+(CN_AUTO_SEND_AFTER_SPEAKING?"checked=checked":"")+" /> <label for='TTGPTAutosend'>Automatically send message to ChatGPT after speaking</label></td></tr>";
-	
+	rows += "<tr><td style='white-space: nowrap'>Automatic send:</td><td><input type=checkbox id='TTGPTAutosend' " + (CN_AUTO_SEND_AFTER_SPEAKING ? "checked=checked" : "") + " /> <label for='TTGPTAutosend'>Automatically send message to ChatGPT after speaking</label></td></tr>";
+
 	// 9. Manual send word
 	rows += "<tr><td style='white-space: nowrap'>Manual send word(s):</td><td><input type=text id='TTGPTSendWord' style='width: 250px; padding: 2px; color: black;' value='" + CN_SAY_THIS_TO_SEND + "' /><span style='font-size: 10px;'>If 'automatic send' is disabled, you can trigger the sending of the message by saying this word (or sequence of words)</span></td></tr>";
-	
+
 	// Prepare save/close buttons
 	rows += "<tr><td colspan=2 style='text-align: center'><br />" +
 		"<button class='TTGPTSave' style='border: 2px solid grey; border-radius: 4px; padding: 6px 24px; font-size: 18px; font-weight: bold; opacity: 0.7;'>✓ Save</button>&nbsp;" +
 		"<button class='TTGPTCancel' style='border: 2px solid grey; border-radius: 4px; padding: 6px 24px; margin-left: 40px; font-size: 18px; opacity: 0.7;'>✗ Cancel</button></td></tr></table>";
-	
+
 	// Header - advanced options
 	rows += "</table><br /><h2>Advanced settings</h2>";
 	rows += "<table width='100%' cellpadding=6 cellspacing=2 style='margin-top: 15px;'>";
-	
+
 	// 10. Split sentences with commas
 	rows += "<tr><td style='white-space: nowrap'>Punctuation in sentences:</td><td><input type=checkbox id='TTGPTIgnoreCommas' " + (CN_IGNORE_COMMAS ? "checked=checked" : "") + " /> <label for='TTGPTIgnoreCommas'>Don't use commas/semicolons/etc. to break down replies into sentences</label></td></tr>";
-	
+
 	// 11. Ignore code blocks
 	rows += "<tr><td style='white-space: nowrap'>Ignore code blocks:</td><td><input type=checkbox id='TTGPTIgnoreCode' " + (CN_IGNORE_CODE_BLOCKS ? "checked=checked" : "") + " /> <label for='TTGPTIgnoreCode'>Don't read blocks of code out loud (ignore them altogether)</label></td></tr>";
-	
+
 	// Keyboard shortcuts
 	rows += "<tr><td style='white-space: nowrap'>Keyboard shortcuts:</td><td><ul>" +
 		"<li>ALT+SHIFT+S: <u>S</u>tart Talk-To-ChatGPT</li>" +
@@ -1232,12 +1475,12 @@ function CN_OnSettingsIconClick() {
 		"<li>ALT+SHIFT+V: suspend/resume bot's voice (<u>V</u>oice)</li>" +
 		"<li>ALT+SHIFT+L: skip current message (<u>L</u>eap)</li>" +
 		"</ul></td></tr>";
-	
+
 	// Prepare save/close buttons
 	rows += "<tr><td colspan=2 style='text-align: center'><br />" +
 		"<button class='TTGPTSave' style='border: 2px solid grey; border-radius: 4px; padding: 6px 24px; font-size: 18px; font-weight: bold; opacity: 0.7;'>✓ Save</button>&nbsp;" +
 		"<button class='TTGPTCancel' style='border: 2px solid grey; border-radius: 4px; padding: 6px 24px; margin-left: 40px; font-size: 18px; opacity: 0.7;'>✗ Cancel</button></td></tr></table>";
-	
+
 	// Add donations frame
 	var donations = "<br/><h2>Support the project</h2><p style='font-size: 15px; margin-top: 15px;'>Are you enjoying Talk-To-ChatGPT and want me to continue improving it? \n" +
 		"\t\t<b>You can help by making a donation to the project.</b> \n" +
@@ -1245,16 +1488,16 @@ function CN_OnSettingsIconClick() {
 		"\t\t<center><a target=_blank href='https://www.paypal.com/donate/?business=BZ43BM7XSSKKW&no_recurring=0&item_name=Are+you+enjoying+Talk-To-ChatGPT?+If+so%2C+consider+making+a+donation+to+keep+the+project+going%2C+and+I%27ll+continue+improving+it%21&currency_code=EUR'>\n" +
 		"\t\t\t<img src='https://edunext.com.sg/paypal.png' alt='' height=80 style='height: 80px;' />\n" +
 		"\t\t</a></center>";
-	
+
 	// Open a whole screenful of settings
 	jQuery("body").append("<div style='background: rgba(0,0,0,0.8); position: absolute; overflow-y: auto; top: 0; right: 0; left: 0; bottom: 0; z-index: 999999; padding: 20px; color: white; font-size: 13px;' id='TTGPTSettingsArea'>" +
-		"<div style='width: 600px; margin-left: auto; margin-right: auto; overflow-y: auto;'><h1>⚙️ Talk-to-ChatGPT settings</h1>"+desc+rows+donations+"</div></div>");
-	
+		"<div style='width: 600px; margin-left: auto; margin-right: auto; overflow-y: auto;'><h1>⚙️ Talk-to-ChatGPT settings</h1>" + desc + rows + donations + "</div></div>");
+
 	// Assign events
-	setTimeout(function() {
+	setTimeout(function () {
 		jQuery(".TTGPTSave").on("click", CN_SaveSettings);
 		jQuery(".TTGPTCancel").on("click", CN_CloseSettingsDialog);
-		
+
 		// Is ElevenLabs enabled? toggle visibility, refresh voice list
 		if (CN_TTS_ELEVENLABS) {
 			jQuery(".CNElevenLabs").show();
@@ -1264,33 +1507,66 @@ function CN_OnSettingsIconClick() {
 			jQuery(".CNElevenLabs").hide();
 			jQuery(".CNBrowserTTS").show();
 		}
-		
+
 		// When the ElevenLabs option is changed
-		jQuery("#TTGPTElevenLabs").on("change", function() {
+		jQuery("#TTGPTElevenLabs").on("change", function () {
 			if (jQuery(this).prop("checked")) {
 				jQuery(".CNElevenLabs").show();
 				jQuery(".CNBrowserTTS").hide();
 				CN_RefreshElevenLabsVoiceList(true);
-			}
-			else {
+			} else {
 				jQuery(".CNElevenLabs").hide();
 				jQuery(".CNBrowserTTS").show();
 			}
 		});
-		
+
 		// When the 'Refresh list' button is clicked
-		jQuery("#TTGPTElevenLabsRefresh").on("click", function() {
+		jQuery("#TTGPTElevenLabsRefresh").on("click", function () {
 			CN_RefreshElevenLabsVoiceList(true);
 		});
-		
+
 		// When the API key is changed
 		jQuery("#TTGPTElevenLabsKey").on("change", function () {
 			CN_RefreshElevenLabsVoiceList(true);
 		});
-		
-		
+
+		// Is Google Wavenet enabled? Toggle visibility, refresh voice list
+		if (CN_TTS_WAVENET) {
+			jQuery(".CNWavenet").show();
+			jQuery(".CNBrowserTTS").hide();
+			CN_RefreshWavenetVoiceList(true);
+		} else {
+			jQuery(".CNWavenet").hide();
+			jQuery(".CNBrowserTTS").show();
+		}
+
+		// When the Google Wavenet option is changed
+		jQuery("#TTGPTWavenet").on("change", function () {
+			if (jQuery(this).prop("checked")) {
+				jQuery(".CNWavenet").show();
+				jQuery(".CNBrowserTTS").hide();
+				CN_RefreshWavenetVoiceList(true);
+			}
+			else {
+				jQuery(".CNWavenet").hide();
+				jQuery(".CNBrowserTTS").show();
+			}
+		});
+
+		// When the 'Refresh list' button is clicked
+		jQuery("#TTGPTWavenetRefresh").on("click", function () {
+			CN_RefreshWavenetVoiceList(true);
+		});
+
+		// When the API key is changed
+		jQuery("#TTGPTWavenetKey").on("change", function () {
+			CN_RefreshWavenetVoiceList(true);
+		});
+
 	}, 100);
 }
+
+//TODO: GO ON FROM HERE (DELETE THIS LINE)
 
 // Save settings and close dialog box
 function CN_SaveSettings() {
@@ -1494,6 +1770,67 @@ function CN_RefreshElevenLabsVoiceList(useKeyFromTextField) {
 	// Let's go
 	xhr.send();
 }
+
+// Refresh Google Wavenet voice list using current API key
+function CN_RefreshWavenetVoiceList(useKeyFromTextField) {
+    // Show loading thingy
+    jQuery("#TTGPTWavenetRefresh").html("...");
+    
+    // Prepare headers & request
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://texttospeech.googleapis.com/v1/voices");
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.setRequestHeader("Content-Type", "application/json");
+    var apikey = useKeyFromTextField ? jQuery("#TTGPTWavenetKey").val() : CN_TTS_WAVENET_APIKEY;
+    if (apikey) xhr.setRequestHeader("Authorization", "Bearer " + apikey);
+    
+    // What happens when we receive the server response
+    xhr.onreadystatechange = function () {
+        var optionList = "<option value=''></option>";
+        if (xhr.readyState === XMLHttpRequest.DONE) {
+            jQuery("#TTGPTWavenetRefresh").html("Refresh list");
+            
+            var result = null;
+            try {
+                result = JSON.parse(xhr.responseText);
+            } catch (e) {
+                jQuery("#TTGPTWavenetRefresh").html("Refresh list");
+                alert("Error retrieving Google Wavenet voice list: "+e.toString()+". Please ensure you have a valid API key and try clicking Refresh List again.");
+                return;
+            }
+            
+            // Check result type?
+            if (typeof result.voices == "undefined") {
+                if (typeof result.error != "undefined" && typeof result.error.message != "undefined") {
+                    // {"error":{"code":400,"message":"Invalid API key...","status":"INVALID_ARGUMENT"}}
+                    alert("Google Wavenet returned the following while refreshing the voice list: "+result.error.message);
+                    return;
+                }
+                // Other
+                alert("Unexpected response from Google Wavenet API: "+JSON.stringify(result));
+                return;
+            }
+            
+            // Build list of voices
+            var found = false;
+            for (var i = 0; i < result.voices.length; i++) {
+                var name = result.voices[i].name;
+                var sel = name == CN_TTS_WAVENET_VOICE ? "selected=selected" : ""; // Restore selected voice
+                if (sel) found = true;
+                optionList += "<option value='" + name + "' " + sel + ">" + name + "</option>";
+            }
+            jQuery("#TTGPTWavenetVoice").html(optionList);
+            
+            // The voice previously selected no longer seems to exist
+            if (CN_TTS_WAVENET_VOICE && !found)
+                alert("The voice previously selected in the settings doesn't seem to be available in your Google Wavenet account anymore. Please select a new voice in the settings to restore Google Wavenet support. Voice ID: "+CN_TTS_WAVENET_VOICE);
+        }
+    };
+    
+    // Let's go
+    xhr.send();
+}
+
 
 // MAIN ENTRY POINT
 // Load jQuery, then run initialization function
